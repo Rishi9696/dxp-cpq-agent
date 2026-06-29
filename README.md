@@ -1,37 +1,48 @@
 # vercel-dxp-poc
 
-A minimal proof-of-concept of a DXP "leader agent": you chat in plain language and a **Claude-managed agent** recommends products from a small catalog. Built with Next.js (App Router) and deployable to Vercel with zero config.
+A minimal proof-of-concept of a DXP "leader agent": you chat in plain language and the agent recommends products from a small catalog. Built with Next.js (App Router) on Vercel.
 
-It's a deliberately stripped-down version of the production DXP agent — keeping only the core pattern: **Claude reads intent → calls a `search_products` tool → we query the catalog → Claude recommends with reasoning.**
+This version uses **Anthropic Managed Agents** — Anthropic hosts the agent loop and a per-session container. You define a persisted **Agent** (model, system prompt, the `search_products` tool) and an **Environment** once; each chat turn runs in a **Session** that streams events, and the app answers the `search_products` tool client-side from the local catalog.
 
-## How it works
+> Note: this is the real Managed Agents product (`client.beta.agents` / `environments` / `sessions`), not just the Claude Messages API. It requires Managed Agents beta access on your Anthropic account.
 
-- **Frontend** ([app/page.tsx](app/page.tsx)) — a chat interface. Sends the conversation to the backend each turn.
-- **Backend** ([app/api/chat/route.ts](app/api/chat/route.ts)) — a serverless route that runs the agent. The API key stays server-side.
-- **Agent** ([lib/agent.ts](lib/agent.ts)) — uses the Anthropic SDK **Tool Runner** (`betaZodTool` + `client.beta.messages.toolRunner`). Claude decides when to call `search_products`; the SDK executes the tool, feeds results back, and loops until Claude produces a final recommendation. Model: `claude-opus-4-8`.
-- **"DB"** ([lib/products.ts](lib/products.ts)) — ~10 everyday products + a simple keyword search. Swap for a real database later.
+## Architecture
+
+- **Agent + Environment** ([scripts/setup-agent.mjs](scripts/setup-agent.mjs)) — created **once**; their IDs go in env vars. The agent declares a `search_products` **custom tool** (executed by us, not in the container).
+- **Backend** ([app/api/chat/route.ts](app/api/chat/route.ts)) — one HTTP call per turn; creates/reuses a session.
+- **Agent loop** ([lib/agent.ts](lib/agent.ts)) — opens the session event stream, sends the user message, and when Claude emits `agent.custom_tool_use` it runs the catalog search and replies with `user.custom_tool_result`, until the session goes idle. Model: `claude-opus-4-8`.
+- **"DB"** ([lib/products.ts](lib/products.ts)) — ~10 everyday products + keyword search.
+- **Frontend** ([app/page.tsx](app/page.tsx)) — a chat UI that holds the `sessionId` for multi-turn memory.
+
+## Setup (one time)
+
+```bash
+npm install
+cp .env.example .env.local        # set ANTHROPIC_API_KEY in .env.local
+npm run setup                     # creates the Agent + Environment, prints their IDs
+```
+
+Add the printed `DXP_AGENT_ID` and `DXP_ENVIRONMENT_ID` to `.env.local`. You now have three vars set: `ANTHROPIC_API_KEY`, `DXP_AGENT_ID`, `DXP_ENVIRONMENT_ID`.
 
 ## Run locally
 
 ```bash
-npm install
-cp .env.example .env.local   # then put your real key in .env.local
 npm run dev
 ```
 
-Set `ANTHROPIC_API_KEY` in `.env.local` (the Anthropic SDK reads it automatically). Open http://localhost:3000 and try:
+Open http://localhost:3000 and try:
 
 - “I need something to commute to work without a car” → bicycle
-- “something to carry my laptop in” → backpack
+- follow up “something to carry my laptop in” → backpack (reuses the session)
 
-Or hit the API directly:
+Or hit the API directly (`sessionId` is optional; pass the one returned to continue a conversation):
 
 ```bash
 curl -s -X POST localhost:3000/api/chat \
   -H 'content-type: application/json' \
-  -d '{"messages":[{"role":"user","content":"something to write notes in"}]}'
+  -d '{"message":"something to write notes in"}'
 ```
 
 ## Deploy to Vercel
 
-Push to GitHub, import the repo at https://vercel.com/new, and add `ANTHROPIC_API_KEY` under the project's Environment Variables. Next.js is auto-detected and deploys with zero config.
+Push to GitHub, import the repo at https://vercel.com/new, and add **all three** env vars (`ANTHROPIC_API_KEY`, `DXP_AGENT_ID`, `DXP_ENVIRONMENT_ID`) under the project's Environment Variables, then redeploy. The same agent/environment are reused across local and production.

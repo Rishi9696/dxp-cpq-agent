@@ -14,6 +14,7 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -34,12 +35,11 @@ export default function Home() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          messages: history.map((m) => ({ role: m.role, content: m.content })),
-        }),
+        body: JSON.stringify({ message: text, sessionId }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error ?? `Request failed: ${res.status}`);
+      if (data.sessionId) setSessionId(data.sessionId);
       setMessages([
         ...history,
         { role: "assistant", content: data.reply, products: data.products },
