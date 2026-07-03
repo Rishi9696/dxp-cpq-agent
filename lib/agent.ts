@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { PRODUCTS, searchProducts, getConfiguration, buildLineItem } from "./catalog";
-import { addLineItem, getLineItems } from "./supabase";
+import { addLineItem, getLineItems, removeLineItem } from "./supabase";
 
 // Anthropic Managed Agents. The Agent (model, system prompt, custom tools) and
 // the Environment are created once by scripts/setup-agent.mjs. Here we create/
@@ -69,6 +69,14 @@ async function runTool(
     const quote = await getLineItems(quoteId);
     return JSON.stringify({ added: li.name, quote });
   }
+  if (name === "remove_from_quote") {
+    const lineItemId =
+      input.line_item_id != null ? Number(input.line_item_id) : undefined;
+    const productId = input.product_id ? String(input.product_id) : undefined;
+    const removed = await removeLineItem(quoteId, { lineItemId, productId });
+    const quote = await getLineItems(quoteId);
+    return JSON.stringify({ removed_count: removed, quote });
+  }
   return JSON.stringify({ error: `Unknown tool: ${name}` });
 }
 
@@ -89,7 +97,7 @@ export async function runAgentTurn(
       items
         .map(
           (li) =>
-            `- ${li.quantity}x ${li.product_name} — $${li.unit_price}${
+            `- [line_item_id ${li.id}] ${li.quantity}x ${li.product_name} — $${li.unit_price}${
               li.configured ? " (configured)" : ""
             }`
         )

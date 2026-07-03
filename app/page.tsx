@@ -227,7 +227,27 @@ export default function Home() {
           ))}
         </div>
         {quote.length > 0 && (
-          <div style={{ marginTop: 8, textAlign: "right", fontWeight: 600 }}>Total: ${quoteTotal}</div>
+          <>
+            <div style={{ marginTop: 8, textAlign: "right", fontWeight: 600 }}>Total: ${quoteTotal}</div>
+            {activeId && (
+              <a
+                href={`/checkout?c=${encodeURIComponent(activeId)}`}
+                style={{
+                  display: "block",
+                  marginTop: 8,
+                  padding: "0.6rem",
+                  textAlign: "center",
+                  background: "#22c55e",
+                  color: "white",
+                  borderRadius: 8,
+                  textDecoration: "none",
+                  fontWeight: 600,
+                }}
+              >
+                Checkout →
+              </a>
+            )}
+          </>
         )}
       </aside>
     </div>

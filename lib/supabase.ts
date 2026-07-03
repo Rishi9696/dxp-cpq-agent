@@ -151,3 +151,17 @@ export async function addLineItem(
   if (error) throw new Error(`addLineItem: ${error.message}`);
   return data as LineItem;
 }
+
+/** Remove line item(s) from a quote by row id, or by product_id if id is absent. */
+export async function removeLineItem(
+  quoteId: string,
+  opts: { lineItemId?: number; productId?: string }
+): Promise<number> {
+  let q = supabase().from("quote_line_items").delete().eq("quote_id", quoteId);
+  if (opts.lineItemId != null) q = q.eq("id", opts.lineItemId);
+  else if (opts.productId) q = q.eq("product_id", opts.productId);
+  else return 0;
+  const { data, error } = await q.select();
+  if (error) throw new Error(`removeLineItem: ${error.message}`);
+  return (data as unknown[])?.length ?? 0;
+}
