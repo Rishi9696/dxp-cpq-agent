@@ -1,48 +1,54 @@
 # vercel-dxp-poc
 
-A minimal proof-of-concept of a DXP "leader agent": you chat in plain language and the agent recommends products from a small catalog. Built with Next.js (App Router) on Vercel.
+A minimal CPQ-style shopping agent: you chat, and a Claude **Managed Agent** searches a catalog, configures products, and builds a **quote** — with all conversation memory and the quote persisted in **Supabase** and shown in the UI.
 
-This version uses **Anthropic Managed Agents** — Anthropic hosts the agent loop and a per-session container. You define a persisted **Agent** (model, system prompt, the `search_products` tool) and an **Environment** once; each chat turn runs in a **Session** that streams events, and the app answers the `search_products` tool client-side from the local catalog.
+It's a deliberately simplified stand-in for the production `dxp_leader_agent_ecs` agent. The Salesforce/AWS backend is **simulated in TypeScript + Supabase** (same tool shapes and flow — no real Salesforce).
 
-> Note: this is the real Managed Agents product (`client.beta.agents` / `environments` / `sessions`), not just the Claude Messages API. It requires Managed Agents beta access on your Anthropic account.
+## How it maps to the genesis agent
+| genesis (`dxp_leader_agent_ecs`) | this POC |
+|---|---|
+| `search_product` (getCatalogProducts) | `search_products` tool → `lib/catalog.ts` |
+| `configure_product` (getAvailableConfiguration) | `configure_product` tool → simulated option/attribute schema |
+| `add_non_configurable` / `maintainQuoteConfiguration` (addLines) | `add_to_quote` tool → Supabase `quote_line_items` |
+| DynamoDB conversation history / summaries | Supabase `conversations` + `messages` |
+| Salesforce Quote Line Items | Supabase `quote_line_items` |
+| leader prompt (execution-vs-discovery intent) | ported into the agent system prompt |
 
 ## Architecture
+- **Agent memory:** the Managed Agents *session* (hosted by Anthropic, one per conversation) is the LLM's working memory.
+- **Durable / UI memory:** Supabase stores every message, the conversation list, and the quote — this is what the UI renders and what survives reloads.
+- **Tools** run server-side in `lib/agent.ts` when the agent emits `agent.custom_tool_use`; `add_to_quote` writes to Supabase scoped to the conversation's quote.
 
-- **Agent + Environment** ([scripts/setup-agent.mjs](scripts/setup-agent.mjs)) — created **once**; their IDs go in env vars. The agent declares a `search_products` **custom tool** (executed by us, not in the container).
-- **Backend** ([app/api/chat/route.ts](app/api/chat/route.ts)) — one HTTP call per turn; creates/reuses a session.
-- **Agent loop** ([lib/agent.ts](lib/agent.ts)) — opens the session event stream, sends the user message, and when Claude emits `agent.custom_tool_use` it runs the catalog search and replies with `user.custom_tool_result`, until the session goes idle. Model: `claude-opus-4-8`.
-- **"DB"** ([lib/products.ts](lib/products.ts)) — ~10 everyday products + keyword search.
-- **Frontend** ([app/page.tsx](app/page.tsx)) — a chat UI that holds the `sessionId` for multi-turn memory.
+## Setup
 
-## Setup (one time)
+### 1. Supabase (one time)
+1. Create a project at https://supabase.com (free tier).
+2. **SQL Editor → New query →** paste all of [`supabase/schema.sql`](supabase/schema.sql) and **Run**. This creates `conversations`, `messages`, `quotes`, `quote_line_items`.
+3. **Project Settings → API:** copy the **Project URL** and the **`service_role`** key (secret — server-side only).
 
+### 2. Env + agent
 ```bash
 npm install
-cp .env.example .env.local        # set ANTHROPIC_API_KEY in .env.local
-npm run setup                     # creates the Agent + Environment, prints their IDs
+cp .env.example .env.local          # then fill in the values below
+npm run setup                       # creates the Managed Agent + Environment, prints their IDs
 ```
+Set in `.env.local`:
+- `ANTHROPIC_API_KEY` — your Anthropic key
+- `DXP_AGENT_ID`, `DXP_ENVIRONMENT_ID` — printed by `npm run setup`
+- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` — from step 1
 
-Add the printed `DXP_AGENT_ID` and `DXP_ENVIRONMENT_ID` to `.env.local`. You now have three vars set: `ANTHROPIC_API_KEY`, `DXP_AGENT_ID`, `DXP_ENVIRONMENT_ID`.
-
-## Run locally
-
+### 3. Run
 ```bash
 npm run dev
 ```
-
 Open http://localhost:3000 and try:
-
-- “I need something to commute to work without a car” → bicycle
-- follow up “something to carry my laptop in” → backpack (reuses the session)
-
-Or hit the API directly (`sessionId` is optional; pass the one returned to continue a conversation):
-
-```bash
-curl -s -X POST localhost:3000/api/chat \
-  -H 'content-type: application/json' \
-  -d '{"message":"something to write notes in"}'
-```
+- **Discovery:** “what laptops do you have for video editing?” → product cards, nothing added.
+- **Configure + add:** “add a MacBook Pro with 32GB RAM” → the agent searches → configures → adds; the **Quote** panel updates.
+- **Non-configurable:** “also add a notebook” → added directly.
+- Reload the page → the conversation, messages, and quote persist; the left sidebar lists past chats. **+ New chat** starts a fresh one.
 
 ## Deploy to Vercel
+Push to GitHub, import the repo, and set all five env vars in **Settings → Environment Variables** (`ANTHROPIC_API_KEY`, `DXP_AGENT_ID`, `DXP_ENVIRONMENT_ID`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`), then redeploy.
 
-Push to GitHub, import the repo at https://vercel.com/new, and add **all three** env vars (`ANTHROPIC_API_KEY`, `DXP_AGENT_ID`, `DXP_ENVIRONMENT_ID`) under the project's Environment Variables, then redeploy. The same agent/environment are reused across local and production.
+## Out of scope (kept simple)
+update/delete line items, real Salesforce/AWS calls, config-rule validation, rolling-summary generation, auth/RLS, streaming.
