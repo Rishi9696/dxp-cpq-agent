@@ -41,5 +41,20 @@ create table if not exists quote_line_items (
 );
 create index if not exists idx_qli_quote on quote_line_items (quote_id, created_at);
 
+-- One row per completed checkout. The full product list is snapshotted into
+-- the `items` JSONB column, so an order is self-contained even if the quote
+-- later changes.
+create table if not exists orders (
+  id              uuid primary key default gen_random_uuid(),
+  order_number    text not null,
+  conversation_id uuid references conversations(id) on delete set null,
+  client_id       text,
+  items           jsonb not null default '[]'::jsonb,   -- [{product_name, quantity, unit_price, options, attributes}]
+  total           numeric not null default 0,
+  status          text not null default 'paid',
+  created_at      timestamptz not null default now()
+);
+create index if not exists idx_orders_client on orders (client_id, created_at desc);
+
 -- Access is server-side only via the service_role key, so RLS is left disabled
 -- for this POC. Do NOT expose the service_role key to the browser.

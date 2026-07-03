@@ -5,7 +5,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 type Card = { id: string; name: string; description: string };
 type Message = { role: "user" | "assistant"; content: string; products?: Card[] };
 type LineItem = {
-  id: number;
+  line_id: string;
   product_name: string;
   quantity: number;
   unit_price: number;
@@ -14,6 +14,7 @@ type LineItem = {
   attributes?: Record<string, unknown>;
 };
 type Conversation = { id: string; title: string; updated_at: string };
+type Order = { order_number: string; total: number; created_at?: string };
 
 function getClientId(): string {
   const KEY = "dxp_client_id";
@@ -31,6 +32,8 @@ export default function Home() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [quote, setQuote] = useState<LineItem[]>([]);
+  const [checkoutDone, setCheckoutDone] = useState(false);
+  const [lastOrder, setLastOrder] = useState<Order | null>(null);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -56,6 +59,8 @@ export default function Home() {
     setActiveId(null);
     setMessages([]);
     setQuote([]);
+    setCheckoutDone(false);
+    setLastOrder(null);
     setError(null);
   }
 
@@ -76,6 +81,8 @@ export default function Home() {
       }))
     );
     setQuote(data.quote ?? []);
+    setCheckoutDone(Boolean(data.checkoutDone));
+    setLastOrder(data.order ?? null);
   }
 
   async function send() {
@@ -99,6 +106,7 @@ export default function Home() {
         { role: "assistant", content: data.reply, products: data.products },
       ]);
       setQuote(data.quote ?? []);
+      setCheckoutDone(Boolean(data.checkoutDone));
       refreshConversations(clientId);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unknown error");
@@ -202,10 +210,30 @@ export default function Home() {
       {/* Quote / cart panel */}
       <aside style={{ width: 280, flexShrink: 0, display: "flex", flexDirection: "column" }}>
         <h2 style={{ margin: "0 0 8px", fontSize: "1.1rem" }}>Quote</h2>
+        {checkoutDone && (
+          <div
+            style={{
+              ...card(),
+              borderColor: "#22c55e",
+              marginBottom: 8,
+              background: "#132b1e",
+            }}
+          >
+            <strong>✅ Checked out</strong>
+            {lastOrder && (
+              <div style={{ color: "#a1a1aa", fontSize: "0.85rem" }}>
+                Order {lastOrder.order_number} · ${lastOrder.total}
+              </div>
+            )}
+            <div style={{ color: "#a1a1aa", fontSize: "0.8rem", marginTop: 4 }}>
+              This quote is locked. Start a <strong>+ New chat</strong> to add more products.
+            </div>
+          </div>
+        )}
         <div style={{ ...chatBox(), minHeight: 0, flex: 1 }}>
           {quote.length === 0 && <p style={{ color: "#6b6b75" }}>Cart is empty.</p>}
           {quote.map((li) => (
-            <div key={li.id} style={card()}>
+            <div key={li.line_id} style={card()}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                 <strong>{li.product_name}</strong>
                 <span>${li.unit_price * li.quantity}</span>
@@ -229,7 +257,7 @@ export default function Home() {
         {quote.length > 0 && (
           <>
             <div style={{ marginTop: 8, textAlign: "right", fontWeight: 600 }}>Total: ${quoteTotal}</div>
-            {activeId && (
+            {activeId && !checkoutDone && (
               <a
                 href={`/checkout?c=${encodeURIComponent(activeId)}`}
                 style={{

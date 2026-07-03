@@ -2,8 +2,7 @@ import { createSession, runAgentTurn } from "@/lib/agent";
 import {
   createConversation,
   getConversation,
-  getQuoteId,
-  getLineItems,
+  getQuote,
   saveMessage,
   touchConversation,
 } from "@/lib/supabase";
@@ -45,7 +44,6 @@ export async function POST(req: Request) {
   }
 
   try {
-    // Resolve (or create) the conversation, its MA session, and its quote.
     let conversation = conversationId ? await getConversation(conversationId) : null;
     if (!conversation) {
       const sessionId = await createSession();
@@ -53,16 +51,20 @@ export async function POST(req: Request) {
     }
     const sessionId = conversation.session_id;
     if (!sessionId) throw new Error("conversation has no session");
-    const quoteId = await getQuoteId(conversation.id);
 
-    // Persist the user turn, run the agent, persist the assistant turn.
     await saveMessage(conversation.id, "user", message);
-    const { reply, products } = await runAgentTurn(sessionId, message, quoteId);
+    const { reply, products } = await runAgentTurn(sessionId, message, conversation.id);
     await saveMessage(conversation.id, "assistant", reply, products);
     await touchConversation(conversation.id);
 
-    const quote = await getLineItems(quoteId);
-    return Response.json({ conversationId: conversation.id, reply, products, quote });
+    const quote = await getQuote(conversation.id);
+    return Response.json({
+      conversationId: conversation.id,
+      reply,
+      products,
+      quote: quote.items,
+      checkoutDone: quote.checkout_done,
+    });
   } catch (e) {
     const m = e instanceof Error ? e.message : "Unknown error";
     return Response.json({ error: `Agent failed: ${m}` }, { status: 500 });

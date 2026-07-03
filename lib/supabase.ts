@@ -34,17 +34,24 @@ export type Message = {
   created_at: string;
 };
 
-export type LineItem = {
-  id: number;
-  quote_id: string;
+// A product line inside a quote. All lines for a conversation live in the
+// quotes.items JSONB array (no separate quote_line_items table).
+export type QuoteItem = {
+  line_id: string;
   product_id: string;
   product_name: string;
   quantity: number;
   unit_price: number;
   configured: boolean;
-  options: unknown[];
+  options: { id: string; name: string; price_delta: number }[];
   attributes: Record<string, unknown>;
-  created_at: string;
+};
+
+export type Quote = {
+  id: string;
+  conversation_id: string;
+  items: QuoteItem[];
+  checkout_done: boolean;
 };
 
 export async function createConversation(
@@ -111,57 +118,72 @@ export async function getMessages(conversationId: string): Promise<Message[]> {
   return (data as Message[]) ?? [];
 }
 
-export async function getQuoteId(conversationId: string): Promise<string> {
+export async function getQuote(conversationId: string): Promise<Quote> {
   const { data, error } = await supabase()
     .from("quotes")
-    .select("id")
+    .select("id, conversation_id, items, checkout_done")
     .eq("conversation_id", conversationId)
     .single();
-  if (error) throw new Error(`getQuoteId: ${error.message}`);
-  return (data as { id: string }).id;
+  if (error) throw new Error(`getQuote: ${error.message}`);
+  const q = data as { id: string; conversation_id: string; items: QuoteItem[] | null; checkout_done: boolean };
+  return { id: q.id, conversation_id: q.conversation_id, items: q.items ?? [], checkout_done: q.checkout_done };
 }
 
-export async function getLineItems(quoteId: string): Promise<LineItem[]> {
-  const { data, error } = await supabase()
-    .from("quote_line_items")
-    .select()
-    .eq("quote_id", quoteId)
-    .order("created_at", { ascending: true });
-  if (error) throw new Error(`getLineItems: ${error.message}`);
-  return (data as LineItem[]) ?? [];
+/** Overwrite the quote's item list (the whole cart lives in this one column). */
+export async function saveQuoteItems(conversationId: string, items: QuoteItem[]): Promise<void> {
+  const { error } = await supabase()
+    .from("quotes")
+    .update({ items })
+    .eq("conversation_id", conversationId);
+  if (error) throw new Error(`saveQuoteItems: ${error.message}`);
 }
 
-export async function addLineItem(
-  quoteId: string,
-  item: {
-    product_id: string;
-    product_name: string;
-    quantity: number;
-    unit_price: number;
-    configured: boolean;
-    options: unknown[];
-    attributes: Record<string, unknown>;
-  }
-): Promise<LineItem> {
+/** Lock the quote after checkout so it can't be modified or re-checked-out. */
+export async function markCheckoutDone(conversationId: string): Promise<void> {
+  const { error } = await supabase()
+    .from("quotes")
+    .update({ checkout_done: true })
+    .eq("conversation_id", conversationId);
+  if (error) throw new Error(`markCheckoutDone: ${error.message}`);
+}
+
+export type Order = {
+  id: string;
+  order_number: string;
+  conversation_id: string | null;
+  client_id: string | null;
+  items: unknown[];
+  total: number;
+  status: string;
+  created_at: string;
+};
+
+/** Record one completed checkout — the product list is snapshotted into `items`. */
+export async function createOrder(
+  conversationId: string,
+  clientId: string,
+  items: unknown[],
+  total: number
+): Promise<Order> {
+  const order_number = "ORD-" + Math.random().toString(36).slice(2, 8).toUpperCase();
   const { data, error } = await supabase()
-    .from("quote_line_items")
-    .insert({ quote_id: quoteId, ...item })
+    .from("orders")
+    .insert({ order_number, conversation_id: conversationId, client_id: clientId, items, total })
     .select()
     .single();
-  if (error) throw new Error(`addLineItem: ${error.message}`);
-  return data as LineItem;
+  if (error) throw new Error(`createOrder: ${error.message}`);
+  return data as Order;
 }
 
-/** Remove line item(s) from a quote by row id, or by product_id if id is absent. */
-export async function removeLineItem(
-  quoteId: string,
-  opts: { lineItemId?: number; productId?: string }
-): Promise<number> {
-  let q = supabase().from("quote_line_items").delete().eq("quote_id", quoteId);
-  if (opts.lineItemId != null) q = q.eq("id", opts.lineItemId);
-  else if (opts.productId) q = q.eq("product_id", opts.productId);
-  else return 0;
-  const { data, error } = await q.select();
-  if (error) throw new Error(`removeLineItem: ${error.message}`);
-  return (data as unknown[])?.length ?? 0;
+/** The most recent order for a conversation — used to show "last checkout". */
+export async function getLatestOrder(conversationId: string): Promise<Order | null> {
+  const { data, error } = await supabase()
+    .from("orders")
+    .select()
+    .eq("conversation_id", conversationId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`getLatestOrder: ${error.message}`);
+  return (data as Order) ?? null;
 }

@@ -1,11 +1,12 @@
+import { randomUUID } from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
 import { PRODUCTS, searchProducts, getConfiguration, buildLineItem } from "./catalog";
-import { addLineItem, getLineItems, removeLineItem } from "./supabase";
+import { getQuote, saveQuoteItems, type QuoteItem } from "./supabase";
 
 // Anthropic Managed Agents. The Agent (model, system prompt, custom tools) and
 // the Environment are created once by scripts/setup-agent.mjs. Here we create/
 // reuse a Session, stream events, answer the custom tools (search_products,
-// configure_product, add_to_quote), and read the final agent message.
+// configure_product, add_to_quote, remove_from_quote), and read the final message.
 const client = new Anthropic();
 
 export type Card = { id: string; name: string; description: string };
@@ -33,11 +34,13 @@ export async function createSession(): Promise<string> {
   return session.id;
 }
 
-// Execute a custom tool call client-side. Returns the JSON string result.
+const optSig = (ids: string[]) => ids.slice().sort().join(",");
+
+// Execute a custom tool call client-side. All quote items live in quotes.items.
 async function runTool(
   name: string,
   input: Record<string, unknown>,
-  quoteId: string
+  conversationId: string
 ): Promise<string> {
   if (name === "search_products") {
     return JSON.stringify(searchProducts(String(input.query ?? "")));
@@ -45,7 +48,14 @@ async function runTool(
   if (name === "configure_product") {
     return JSON.stringify(getConfiguration(String(input.product_id ?? "")));
   }
+
   if (name === "add_to_quote") {
+    const quote = await getQuote(conversationId);
+    if (quote.checkout_done) {
+      return JSON.stringify({
+        error: "This quote is already checked out and locked. Tell the user to start a New chat to build a new quote.",
+      });
+    }
     const productId = String(input.product_id ?? "");
     const quantity = Math.max(1, Number(input.quantity ?? 1) || 1);
     const optionIds = Array.isArray(input.selected_option_ids)
@@ -57,52 +67,80 @@ async function runTool(
         : {};
     const li = buildLineItem(productId, optionIds);
     if (!li) return JSON.stringify({ error: `Unknown product_id: ${productId}` });
-    await addLineItem(quoteId, {
-      product_id: productId,
-      product_name: li.name,
-      quantity,
-      unit_price: li.unit_price,
-      configured: li.configured,
-      options: li.options,
-      attributes,
-    });
-    const quote = await getLineItems(quoteId);
-    return JSON.stringify({ added: li.name, quote });
+
+    // Merge identical lines (same product + options + attributes) into quantity.
+    const items = quote.items;
+    const match = items.find(
+      (it) =>
+        it.product_id === productId &&
+        optSig(it.options.map((o) => o.id)) === optSig(optionIds) &&
+        JSON.stringify(it.attributes) === JSON.stringify(attributes)
+    );
+    if (match) match.quantity += quantity;
+    else
+      items.push({
+        line_id: randomUUID().slice(0, 8),
+        product_id: productId,
+        product_name: li.name,
+        quantity,
+        unit_price: li.unit_price,
+        configured: li.configured,
+        options: li.options,
+        attributes,
+      });
+    await saveQuoteItems(conversationId, items);
+    return JSON.stringify({ added: li.name, quote: items });
   }
+
   if (name === "remove_from_quote") {
-    const lineItemId =
-      input.line_item_id != null ? Number(input.line_item_id) : undefined;
+    const quote = await getQuote(conversationId);
+    if (quote.checkout_done) {
+      return JSON.stringify({
+        error: "This quote is already checked out and locked. Tell the user to start a New chat.",
+      });
+    }
+    const lineId = input.line_id != null ? String(input.line_id) : undefined;
     const productId = input.product_id ? String(input.product_id) : undefined;
-    const removed = await removeLineItem(quoteId, { lineItemId, productId });
-    const quote = await getLineItems(quoteId);
-    return JSON.stringify({ removed_count: removed, quote });
+    const before = quote.items.length;
+    const items = quote.items.filter((it) =>
+      lineId ? it.line_id !== lineId : productId ? it.product_id !== productId : true
+    );
+    await saveQuoteItems(conversationId, items);
+    return JSON.stringify({ removed_count: before - items.length, quote: items });
   }
+
   return JSON.stringify({ error: `Unknown tool: ${name}` });
 }
 
 /**
- * Run one user turn on an existing session, scoped to a quote. Injects the
- * current quote as context (like the genesis quote_markdown), streams events,
+ * Run one user turn on an existing session, scoped to a conversation's quote.
+ * Injects the current quote (and lock state) as context, streams events,
  * answers custom tools inline, and returns the final agent text + product cards.
  */
 export async function runAgentTurn(
   sessionId: string,
   userText: string,
-  quoteId: string
+  conversationId: string
 ): Promise<TurnResult> {
-  // Inject current quote state so the agent knows what's already in the cart.
-  const items = await getLineItems(quoteId);
-  const quoteContext = items.length
-    ? "Current quote/cart:\n" +
-      items
+  const quote = await getQuote(conversationId);
+  let quoteContext: string;
+  if (quote.checkout_done) {
+    quoteContext =
+      "This quote has already been CHECKED OUT and is locked — do NOT add or remove products. Tell the user to start a New chat to build a new quote.";
+  } else if (quote.items.length) {
+    quoteContext =
+      "Current quote/cart:\n" +
+      quote.items
         .map(
-          (li) =>
-            `- [line_item_id ${li.id}] ${li.quantity}x ${li.product_name} — $${li.unit_price}${
-              li.configured ? " (configured)" : ""
+          (it: QuoteItem) =>
+            `- [line_id ${it.line_id}] ${it.quantity}x ${it.product_name} — $${it.unit_price}${
+              it.configured ? " (configured)" : ""
             }`
         )
-        .join("\n")
-    : "The quote/cart is currently empty.";
+        .join("\n");
+  } else {
+    quoteContext = "The quote/cart is currently empty.";
+  }
 
   let reply = "";
   let toolUses = 0;
@@ -110,10 +148,7 @@ export async function runAgentTurn(
   const stream = await client.beta.sessions.events.stream(sessionId);
   await client.beta.sessions.events.send(sessionId, {
     events: [
-      {
-        type: "user.message",
-        content: [{ type: "text", text: `[${quoteContext}]\n\nUser: ${userText}` }],
-      },
+      { type: "user.message", content: [{ type: "text", text: `[${quoteContext}]\n\nUser: ${userText}` }] },
     ],
   });
 
@@ -123,26 +158,20 @@ export async function runAgentTurn(
         if (block.type === "text") reply += block.text;
       }
     } else if (event.type === "agent.custom_tool_use") {
-      reply = ""; // keep only the final message emitted after the last tool result
-      if (++toolUses > 12) break; // safety against loops
+      reply = "";
+      if (++toolUses > 12) break;
       const result = await runTool(
         event.name,
         (event.input as Record<string, unknown>) ?? {},
-        quoteId
+        conversationId
       );
       await client.beta.sessions.events.send(sessionId, {
         events: [
-          {
-            type: "user.custom_tool_result",
-            custom_tool_use_id: event.id,
-            content: [{ type: "text", text: result }],
-          },
+          { type: "user.custom_tool_result", custom_tool_use_id: event.id, content: [{ type: "text", text: result }] },
         ],
       });
     } else if (event.type === "session.error") {
-      throw new Error(
-        "Session error: " + JSON.stringify((event as { error?: unknown }).error ?? event)
-      );
+      throw new Error("Session error: " + JSON.stringify((event as { error?: unknown }).error ?? event));
     } else if (event.type === "session.status_idle") {
       const reason = (event as { stop_reason?: { type?: string } }).stop_reason;
       if (reason?.type !== "requires_action") break;
@@ -151,11 +180,9 @@ export async function runAgentTurn(
     }
   }
 
-  // Cards = catalog products the agent named in its reply.
   const replyLower = reply.toLowerCase();
-  const products: Card[] = PRODUCTS.filter((p) =>
-    replyLower.includes(p.name.toLowerCase())
-  ).map((p) => ({ id: p.id, name: p.name, description: p.description }));
-
+  const products: Card[] = PRODUCTS.filter((p) => replyLower.includes(p.name.toLowerCase())).map(
+    (p) => ({ id: p.id, name: p.name, description: p.description })
+  );
   return { reply: reply.trim(), products };
 }

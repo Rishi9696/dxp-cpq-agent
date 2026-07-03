@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 
 type LineItem = {
-  id: number;
+  line_id: string;
   product_name: string;
   quantity: number;
   unit_price: number;
@@ -14,6 +14,7 @@ type LineItem = {
 export default function Checkout() {
   const [conversationId, setConversationId] = useState<string>("");
   const [quote, setQuote] = useState<LineItem[]>([]);
+  const [checkoutDone, setCheckoutDone] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -25,7 +26,10 @@ export default function Checkout() {
     }
     fetch(`/api/conversations/${c}`)
       .then((r) => r.json())
-      .then((d) => setQuote(d.quote ?? []))
+      .then((d) => {
+        setQuote(d.quote ?? []);
+        setCheckoutDone(Boolean(d.checkoutDone));
+      })
       .finally(() => setLoading(false));
   }, []);
 
@@ -38,6 +42,10 @@ export default function Checkout() {
 
       {loading ? (
         <p style={{ color: "#a1a1aa" }}>Loading your quote…</p>
+      ) : checkoutDone ? (
+        <p style={{ color: "#a1a1aa" }}>
+          This quote is already checked out. Start a <a href="/" style={{ color: "#818cf8" }}>new chat</a> to build a new one.
+        </p>
       ) : quote.length === 0 ? (
         <p style={{ color: "#a1a1aa" }}>
           Your quote is empty. Add products in the chat first.
@@ -47,7 +55,7 @@ export default function Checkout() {
           <div style={{ background: "#16161c", borderRadius: 10, padding: "1rem", marginBottom: 16 }}>
             {quote.map((li) => (
               <div
-                key={li.id}
+                key={li.line_id}
                 style={{
                   display: "flex",
                   justifyContent: "space-between",

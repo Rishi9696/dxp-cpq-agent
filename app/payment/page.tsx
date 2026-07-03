@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-type LineItem = { id: number; product_name: string; quantity: number; unit_price: number };
+type LineItem = { line_id: string; product_name: string; quantity: number; unit_price: number };
 
 export default function Payment() {
   const [conversationId, setConversationId] = useState<string>("");
@@ -10,6 +10,7 @@ export default function Payment() {
   const [paying, setPaying] = useState(false);
   const [done, setDone] = useState(false);
   const [orderId, setOrderId] = useState("");
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const c = new URLSearchParams(window.location.search).get("c") ?? "";
@@ -23,14 +24,26 @@ export default function Payment() {
 
   const total = quote.reduce((s, li) => s + li.unit_price * li.quantity, 0);
 
-  function pay() {
+  async function pay() {
     setPaying(true);
-    // Dummy payment — no real charge. Simulate a short processing delay.
-    setTimeout(() => {
-      setOrderId("ORD-" + Math.random().toString(36).slice(2, 8).toUpperCase());
-      setPaying(false);
+    setError(null);
+    // Dummy payment — no real charge — but we DO record a real order row.
+    try {
+      const clientId = localStorage.getItem("dxp_client_id") ?? "";
+      const res = await fetch("/api/checkout", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ conversationId, clientId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error ?? `Checkout failed: ${res.status}`);
+      setOrderId(data.order_number);
       setDone(true);
-    }, 900);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setPaying(false);
+    }
   }
 
   if (done) {
@@ -90,6 +103,7 @@ export default function Payment() {
         >
           {paying ? "Processing…" : `Complete Payment ($${total})`}
         </button>
+        {error && <p style={{ color: "#f87171", margin: 0 }}>Error: {error}</p>}
       </div>
     </main>
   );
