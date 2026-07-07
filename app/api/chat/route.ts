@@ -1,11 +1,13 @@
-import { createSession, runAgentTurn } from "@/lib/agent";
+import { createSession, runAgentTurnStreaming, generateTitle } from "@/lib/agent";
 import {
   createConversation,
   getConversation,
   getQuote,
   saveMessage,
   touchConversation,
+  updateConversationTitle,
 } from "@/lib/supabase";
+import { requireSessionUser } from "@/lib/supabase/server";
 
 // Managed Agents flow can take a while (session provisioning + agent loop).
 export const runtime = "nodejs";
@@ -28,45 +30,87 @@ export async function POST(req: Request) {
     );
   }
 
+  const user = await requireSessionUser().catch(() => null);
+  if (!user) return Response.json({ error: "Not authenticated" }, { status: 401 });
+
   let message: string;
   let conversationId: string | undefined;
-  let clientId: string;
   try {
     const body = await req.json();
     message = String(body?.message ?? "").trim();
     conversationId = typeof body?.conversationId === "string" ? body.conversationId : undefined;
-    clientId = String(body?.clientId ?? "").trim();
     if (!message) throw new Error("message is required");
-    if (!clientId) throw new Error("clientId is required");
   } catch (e) {
     const m = e instanceof Error ? e.message : "bad body";
     return Response.json({ error: `Invalid request body: ${m}` }, { status: 400 });
   }
 
-  try {
-    let conversation = conversationId ? await getConversation(conversationId) : null;
-    if (!conversation) {
-      const sessionId = await createSession();
-      conversation = await createConversation(clientId, sessionId, message);
-    }
-    const sessionId = conversation.session_id;
-    if (!sessionId) throw new Error("conversation has no session");
-
-    await saveMessage(conversation.id, "user", message);
-    const { reply, products } = await runAgentTurn(sessionId, message, conversation.id);
-    await saveMessage(conversation.id, "assistant", reply, products);
-    await touchConversation(conversation.id);
-
-    const quote = await getQuote(conversation.id);
-    return Response.json({
-      conversationId: conversation.id,
-      reply,
-      products,
-      quote: quote.items,
-      checkoutDone: quote.checkout_done,
-    });
-  } catch (e) {
-    const m = e instanceof Error ? e.message : "Unknown error";
-    return Response.json({ error: `Agent failed: ${m}` }, { status: 500 });
+  // Resolve (or create) the conversation up front so ownership errors are plain JSON.
+  let conversation = conversationId ? await getConversation(conversationId) : null;
+  if (conversation && conversation.user_id !== user.id) {
+    return Response.json({ error: "Not found" }, { status: 404 });
   }
+  let isNew = false;
+  if (!conversation) {
+    const sessionId = await createSession();
+    conversation = await createConversation(user.id, sessionId, message);
+    isNew = true;
+  }
+  const conv = conversation;
+  const sessionId = conv.session_id;
+  if (!sessionId) return Response.json({ error: "conversation has no session" }, { status: 500 });
+
+  // Stream the turn as Server-Sent Events.
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (obj: unknown) =>
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+      try {
+        send({ type: "meta", conversationId: conv.id });
+        await saveMessage(conv.id, "user", message);
+
+        const { reply, products } = await runAgentTurnStreaming(sessionId, message, conv.id, (e) =>
+          send(e)
+        );
+
+        await saveMessage(conv.id, "assistant", reply, products);
+        await touchConversation(conv.id);
+
+        // Auto-rename the chat from the conversation on its first turn.
+        let title: string | undefined;
+        if (isNew) {
+          const t = await generateTitle(message, reply);
+          if (t) {
+            await updateConversationTitle(conv.id, t);
+            title = t;
+          }
+        }
+
+        const quote = await getQuote(conv.id);
+        send({
+          type: "done",
+          conversationId: conv.id,
+          reply,
+          products,
+          quote: quote.items,
+          checkoutDone: quote.checkout_done,
+          title,
+        });
+      } catch (e) {
+        const m = e instanceof Error ? e.message : "Unknown error";
+        send({ type: "error", error: `Agent failed: ${m}` });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+    },
+  });
 }

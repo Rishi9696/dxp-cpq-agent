@@ -6,10 +6,12 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "setup": "node --env-file=.env.local scripts/setup-agent.mjs"
+    "setup": "node --env-file=.env.local scripts/setup-agent.mjs",
+    "create-user": "node --env-file=.env.local scripts/create-user.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.107.0",
+    "@supabase/ssr": "^0.12.0",
     "@supabase/supabase-js": "^2.110.0",
     "next": "^15.1.0",
     "react": "^19.0.0",

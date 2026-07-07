@@ -29,11 +29,10 @@ export default function Payment() {
     setError(null);
     // Dummy payment — no real charge — but we DO record a real order row.
     try {
-      const clientId = localStorage.getItem("dxp_client_id") ?? "";
       const res = await fetch("/api/checkout", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ conversationId, clientId }),
+        body: JSON.stringify({ conversationId }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error ?? `Checkout failed: ${res.status}`);

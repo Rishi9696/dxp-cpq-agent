@@ -186,3 +186,123 @@ export async function runAgentTurn(
   );
   return { reply: reply.trim(), products };
 }
+
+const TOOL_STATUS: Record<string, string> = {
+  search_products: "Searching the catalog…",
+  configure_product: "Checking configuration options…",
+  add_to_quote: "Adding to your quote…",
+  remove_from_quote: "Updating your quote…",
+};
+
+export type StreamEvent =
+  | { type: "status"; text: string }
+  | { type: "reset" }
+  | { type: "text"; text: string };
+
+/**
+ * Streaming variant: same turn as runAgentTurn, but invokes `onEvent` as the
+ * managed instance emits events — tool-activity status and message text — so
+ * the UI can show progress live. Returns the final reply + product cards.
+ */
+export async function runAgentTurnStreaming(
+  sessionId: string,
+  userText: string,
+  conversationId: string,
+  onEvent: (e: StreamEvent) => void
+): Promise<TurnResult> {
+  const quote = await getQuote(conversationId);
+  let quoteContext: string;
+  if (quote.checkout_done) {
+    quoteContext =
+      "This quote has already been CHECKED OUT and is locked — do NOT add or remove products. Tell the user to start a New chat to build a new quote.";
+  } else if (quote.items.length) {
+    quoteContext =
+      "Current quote/cart:\n" +
+      quote.items
+        .map(
+          (it: QuoteItem) =>
+            `- [line_id ${it.line_id}] ${it.quantity}x ${it.product_name} — $${it.unit_price}${
+              it.configured ? " (configured)" : ""
+            }`
+        )
+        .join("\n");
+  } else {
+    quoteContext = "The quote/cart is currently empty.";
+  }
+
+  let reply = "";
+  let toolUses = 0;
+
+  const stream = await client.beta.sessions.events.stream(sessionId);
+  await client.beta.sessions.events.send(sessionId, {
+    events: [
+      { type: "user.message", content: [{ type: "text", text: `[${quoteContext}]\n\nUser: ${userText}` }] },
+    ],
+  });
+
+  for await (const event of stream) {
+    if (event.type === "agent.message") {
+      for (const block of event.content) {
+        if (block.type === "text") {
+          reply += block.text;
+          onEvent({ type: "text", text: block.text });
+        }
+      }
+    } else if (event.type === "agent.custom_tool_use") {
+      // A tool call means any streamed text so far was preamble — clear it,
+      // show what the agent is doing, then run the tool.
+      reply = "";
+      onEvent({ type: "reset" });
+      onEvent({ type: "status", text: TOOL_STATUS[event.name] ?? "Working…" });
+      if (++toolUses > 12) break;
+      const result = await runTool(
+        event.name,
+        (event.input as Record<string, unknown>) ?? {},
+        conversationId
+      );
+      await client.beta.sessions.events.send(sessionId, {
+        events: [
+          { type: "user.custom_tool_result", custom_tool_use_id: event.id, content: [{ type: "text", text: result }] },
+        ],
+      });
+    } else if (event.type === "session.error") {
+      throw new Error("Session error: " + JSON.stringify((event as { error?: unknown }).error ?? event));
+    } else if (event.type === "session.status_idle") {
+      const reason = (event as { stop_reason?: { type?: string } }).stop_reason;
+      if (reason?.type !== "requires_action") break;
+    } else if (event.type === "session.status_terminated") {
+      break;
+    }
+  }
+
+  const replyLower = reply.toLowerCase();
+  const products: Card[] = PRODUCTS.filter((p) => replyLower.includes(p.name.toLowerCase())).map(
+    (p) => ({ id: p.id, name: p.name, description: p.description })
+  );
+  return { reply: reply.trim(), products };
+}
+
+/**
+ * Generate a short chat title from the first exchange (auto-rename based on
+ * the conversation). Uses a small, fast model; failure is non-fatal.
+ */
+export async function generateTitle(userText: string, reply: string): Promise<string | null> {
+  try {
+    const r = await client.messages.create({
+      model: "claude-haiku-4-5",
+      max_tokens: 24,
+      system:
+        "Write a 3-5 word title summarizing this shopping conversation. Reply with ONLY the title — no quotes, no trailing punctuation.",
+      messages: [{ role: "user", content: `User: ${userText}\nAssistant: ${reply}` }],
+    });
+    const t = r.content
+      .filter((b): b is Anthropic.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join(" ")
+      .trim()
+      .replace(/^["']|["']$/g, "");
+    return t || null;
+  } catch {
+    return null;
+  }
+}

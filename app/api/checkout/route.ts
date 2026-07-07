@@ -1,4 +1,5 @@
-import { getQuote, createOrder, markCheckoutDone } from "@/lib/supabase";
+import { getConversation, getQuote, createOrder, markCheckoutDone } from "@/lib/supabase";
+import { requireSessionUser } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
 
@@ -12,12 +13,13 @@ export async function POST(req: Request) {
     );
   }
 
+  const user = await requireSessionUser().catch(() => null);
+  if (!user) return Response.json({ error: "Not authenticated" }, { status: 401 });
+
   let conversationId: string;
-  let clientId: string;
   try {
     const body = await req.json();
     conversationId = String(body?.conversationId ?? "").trim();
-    clientId = String(body?.clientId ?? "").trim();
     if (!conversationId) throw new Error("conversationId is required");
   } catch (e) {
     const m = e instanceof Error ? e.message : "bad body";
@@ -25,6 +27,11 @@ export async function POST(req: Request) {
   }
 
   try {
+    const conversation = await getConversation(conversationId);
+    if (!conversation || conversation.user_id !== user.id) {
+      return Response.json({ error: "not found" }, { status: 404 });
+    }
+
     const quote = await getQuote(conversationId);
     if (quote.checkout_done) {
       return Response.json(
@@ -36,7 +43,7 @@ export async function POST(req: Request) {
       return Response.json({ error: "Quote is empty — nothing to check out." }, { status: 400 });
     }
     const total = quote.items.reduce((s, li) => s + li.unit_price * li.quantity, 0);
-    const order = await createOrder(conversationId, clientId, quote.items, total);
+    const order = await createOrder(conversationId, user.id, quote.items, total);
     await markCheckoutDone(conversationId);
     return Response.json({
       order_number: order.order_number,

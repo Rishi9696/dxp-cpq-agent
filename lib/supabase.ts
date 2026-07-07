@@ -18,7 +18,7 @@ export function supabase(): SupabaseClient {
 
 export type Conversation = {
   id: string;
-  client_id: string;
+  user_id: string;
   session_id: string | null;
   title: string;
   created_at: string;
@@ -55,13 +55,13 @@ export type Quote = {
 };
 
 export async function createConversation(
-  clientId: string,
+  userId: string,
   sessionId: string,
   title: string
 ): Promise<Conversation> {
   const { data, error } = await supabase()
     .from("conversations")
-    .insert({ client_id: clientId, session_id: sessionId, title: title.slice(0, 80) })
+    .insert({ user_id: userId, session_id: sessionId, title: title.slice(0, 80) })
     .select()
     .single();
   if (error) throw new Error(`createConversation: ${error.message}`);
@@ -81,11 +81,11 @@ export async function getConversation(id: string): Promise<Conversation | null> 
   return (data as Conversation) ?? null;
 }
 
-export async function listConversations(clientId: string): Promise<Conversation[]> {
+export async function listConversations(userId: string): Promise<Conversation[]> {
   const { data, error } = await supabase()
     .from("conversations")
     .select()
-    .eq("client_id", clientId)
+    .eq("user_id", userId)
     .order("updated_at", { ascending: false })
     .limit(50);
   if (error) throw new Error(`listConversations: ${error.message}`);
@@ -94,6 +94,11 @@ export async function listConversations(clientId: string): Promise<Conversation[
 
 export async function touchConversation(id: string): Promise<void> {
   await supabase().from("conversations").update({ updated_at: new Date().toISOString() }).eq("id", id);
+}
+
+/** Set the conversation's title (used by the auto-rename-from-conversation logic). */
+export async function updateConversationTitle(id: string, title: string): Promise<void> {
+  await supabase().from("conversations").update({ title: title.slice(0, 80) }).eq("id", id);
 }
 
 export async function saveMessage(
@@ -151,7 +156,7 @@ export type Order = {
   id: string;
   order_number: string;
   conversation_id: string | null;
-  client_id: string | null;
+  user_id: string | null;
   items: unknown[];
   total: number;
   status: string;
@@ -161,14 +166,14 @@ export type Order = {
 /** Record one completed checkout — the product list is snapshotted into `items`. */
 export async function createOrder(
   conversationId: string,
-  clientId: string,
+  userId: string,
   items: unknown[],
   total: number
 ): Promise<Order> {
   const order_number = "ORD-" + Math.random().toString(36).slice(2, 8).toUpperCase();
   const { data, error } = await supabase()
     .from("orders")
-    .insert({ order_number, conversation_id: conversationId, client_id: clientId, items, total })
+    .insert({ order_number, conversation_id: conversationId, user_id: userId, items, total })
     .select()
     .single();
   if (error) throw new Error(`createOrder: ${error.message}`);
