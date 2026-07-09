@@ -33,6 +33,69 @@ const SUGGESTIONS = [
   "What accessories go with an iPad Pro?",
 ];
 
+// --- Minimal markdown rendering for agent replies (bold, code, bullet/numbered lists) ---
+function renderInline(text: string): React.ReactNode[] {
+  // Split on **bold** and `code` spans.
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return <strong key={i}>{part.slice(2, -2)}</strong>;
+    }
+    if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
+      return <code key={i}>{part.slice(1, -1)}</code>;
+    }
+    return part;
+  });
+}
+
+function MessageContent({ text }: { text: string }) {
+  const lines = text.split("\n");
+  const blocks: React.ReactNode[] = [];
+  let list: { ordered: boolean; items: string[] } | null = null;
+  let para: string[] = [];
+
+  const flushPara = () => {
+    if (para.length) {
+      blocks.push(<p key={blocks.length}>{renderInline(para.join("\n"))}</p>);
+      para = [];
+    }
+  };
+  const flushList = () => {
+    if (list) {
+      const items = list.items.map((item, i) => <li key={i}>{renderInline(item)}</li>);
+      blocks.push(
+        list.ordered ? <ol key={blocks.length}>{items}</ol> : <ul key={blocks.length}>{items}</ul>
+      );
+      list = null;
+    }
+  };
+
+  for (const line of lines) {
+    const bullet = line.match(/^\s*[-*•]\s+(.*)$/);
+    const numbered = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (bullet || numbered) {
+      flushPara();
+      const ordered = Boolean(numbered);
+      const content = (bullet ?? numbered)![1];
+      if (!list || list.ordered !== ordered) {
+        flushList();
+        list = { ordered, items: [] };
+      }
+      list.items.push(content);
+    } else if (line.trim() === "") {
+      flushPara();
+      flushList();
+    } else {
+      flushList();
+      para.push(line);
+    }
+  }
+  flushPara();
+  flushList();
+
+  return <div className="md">{blocks}</div>;
+}
+
 function initials(email: string): string {
   const name = email.split("@")[0] ?? "";
   const parts = name.split(/[._-]/).filter(Boolean);
@@ -373,7 +436,9 @@ export default function ChatClient({ userEmail }: { userEmail: string }) {
                     </span>
                   )}
                   <div className="msg-content-col">
-                    <div className="msg-bubble">{m.content}</div>
+                    <div className="msg-bubble">
+                      {m.role === "assistant" ? <MessageContent text={m.content} /> : m.content}
+                    </div>
                     {m.products && m.products.length > 0 && (
                       <button
                         className="product-pointer"
@@ -395,7 +460,9 @@ export default function ChatClient({ userEmail }: { userEmail: string }) {
                   </span>
                   <div className="msg-content-col">
                     {streamingText ? (
-                      <div className="msg-bubble">{streamingText}</div>
+                      <div className="msg-bubble">
+                        <MessageContent text={streamingText} />
+                      </div>
                     ) : status ? (
                       <div className="msg-bubble msg-status">{status}</div>
                     ) : (
