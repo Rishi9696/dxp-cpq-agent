@@ -2,8 +2,17 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import type { OptionGroup, CatalogAttribute } from "@/lib/catalog";
 
-type Card = { id: string; name: string; description: string };
+type Card = {
+  id: string;
+  name: string;
+  description: string;
+  base_price?: number;
+  configurable?: boolean;
+  option_groups?: OptionGroup[];
+  attributes?: CatalogAttribute[];
+};
 type Message = { role: "user" | "assistant"; content: string; products?: Card[] };
 type LineItem = {
   line_id: string;
@@ -45,8 +54,20 @@ export default function ChatClient({ userEmail }: { userEmail: string }) {
   const [signingOut, setSigningOut] = useState(false);
   const [streamingText, setStreamingText] = useState("");
   const [status, setStatus] = useState<string | null>(null);
+  const [catalog, setCatalog] = useState<Card[]>([]);
+  const [catalogError, setCatalogError] = useState(false);
+  const [recommended, setRecommended] = useState<Card[]>([]);
+  const [showAll, setShowAll] = useState(true);
   const endRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Serialize cart adds and track the live conversation id so two quick adds
+  // (before the first one creates a conversation) can't split into two carts.
+  const activeIdRef = useRef<string | null>(null);
+  const addChainRef = useRef<Promise<unknown>>(Promise.resolve());
+
+  useEffect(() => {
+    activeIdRef.current = activeId;
+  }, [activeId]);
 
   const refreshConversations = useCallback(async () => {
     const res = await fetch("/api/conversations");
@@ -57,6 +78,23 @@ export default function ChatClient({ userEmail }: { userEmail: string }) {
   useEffect(() => {
     refreshConversations();
   }, [refreshConversations]);
+
+  // Load the full catalog once — the panel shows everything until the agent recommends.
+  const loadCatalog = useCallback(async () => {
+    setCatalogError(false);
+    try {
+      const res = await fetch("/api/products");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error ?? "Failed to load catalog");
+      setCatalog(data.products ?? []);
+    } catch {
+      setCatalogError(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadCatalog();
+  }, [loadCatalog]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -76,6 +114,12 @@ export default function ChatClient({ userEmail }: { userEmail: string }) {
     setCheckoutDone(false);
     setLastOrder(null);
     setError(null);
+    setRecommended([]);
+    setShowAll(true);
+  }
+
+  function goToCart() {
+    router.push(activeId ? `/cart?c=${encodeURIComponent(activeId)}` : "/cart");
   }
 
   async function signOut() {
@@ -94,16 +138,21 @@ export default function ChatClient({ userEmail }: { userEmail: string }) {
       setError(data?.error ?? "Failed to load conversation");
       return;
     }
-    setMessages(
-      (data.messages ?? []).map((m: { role: string; content: string; products?: Card[] }) => ({
+    const loadedMessages = (data.messages ?? []).map(
+      (m: { role: string; content: string; products?: Card[] }) => ({
         role: m.role,
         content: m.content,
         products: m.products ?? [],
-      }))
+      })
     );
+    setMessages(loadedMessages);
     setQuote(data.quote ?? []);
     setCheckoutDone(Boolean(data.checkoutDone));
     setLastOrder(data.order ?? null);
+    const lastWithProducts = [...loadedMessages].reverse().find((m) => m.products && m.products.length > 0);
+    const rec = lastWithProducts?.products ?? [];
+    setRecommended(rec);
+    setShowAll(rec.length === 0);
   }
 
   async function send(text?: string) {
@@ -169,6 +218,10 @@ export default function ChatClient({ userEmail }: { userEmail: string }) {
         ]);
         setQuote(doneEvent.quote ?? []);
         setCheckoutDone(Boolean(doneEvent.checkoutDone));
+        if (doneEvent.products && doneEvent.products.length > 0) {
+          setRecommended(doneEvent.products);
+          setShowAll(false);
+        }
         refreshConversations();
       }
     } catch (e) {
@@ -180,6 +233,47 @@ export default function ChatClient({ userEmail }: { userEmail: string }) {
     }
   }
 
+  // Add a configured product to the cart from the UI (same path the agent uses).
+  // Adds are chained so concurrent clicks reuse one conversation/cart.
+  function addToCart(
+    productId: string,
+    quantity: number,
+    optionIds: string[],
+    attributes: Record<string, unknown>
+  ): Promise<boolean> {
+    const run = async (): Promise<boolean> => {
+      setError(null);
+      try {
+        const res = await fetch("/api/quote", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            conversationId: activeIdRef.current,
+            productId,
+            quantity,
+            optionIds,
+            attributes,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error ?? "Failed to add to cart");
+        if (!activeIdRef.current && data.conversationId) {
+          activeIdRef.current = data.conversationId;
+          setActiveId(data.conversationId);
+          refreshConversations();
+        }
+        setQuote(data.items ?? []);
+        return true;
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Unknown error");
+        return false;
+      }
+    };
+    const p = addChainRef.current.then(run, run);
+    addChainRef.current = p;
+    return p;
+  }
+
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -187,7 +281,9 @@ export default function ChatClient({ userEmail }: { userEmail: string }) {
     }
   }
 
-  const quoteTotal = quote.reduce((s, li) => s + li.unit_price * li.quantity, 0);
+  const cartCount = quote.reduce((s, li) => s + li.quantity, 0);
+  const hasRecommendations = recommended.length > 0;
+  const displayedProducts = hasRecommendations && !showAll ? recommended : catalog;
 
   return (
     <div className="app">
@@ -243,6 +339,10 @@ export default function ChatClient({ userEmail }: { userEmail: string }) {
             <p className="main-header-title">DXP CPQ Agent</p>
             <p className="main-header-subtitle">Search, configure, and add products to your quote.</p>
           </div>
+          <button className="cart-btn" onClick={goToCart} title="View cart" aria-label="View cart">
+            <CartIcon />
+            {cartCount > 0 && <span className="cart-badge">{cartCount}</span>}
+          </button>
         </div>
 
         {messages.length === 0 ? (
@@ -275,14 +375,15 @@ export default function ChatClient({ userEmail }: { userEmail: string }) {
                   <div className="msg-content-col">
                     <div className="msg-bubble">{m.content}</div>
                     {m.products && m.products.length > 0 && (
-                      <div className="product-grid">
-                        {m.products.map((p) => (
-                          <div key={p.id} className="product-card">
-                            <strong>{p.name}</strong>
-                            <div className="product-card-desc">{p.description}</div>
-                          </div>
-                        ))}
-                      </div>
+                      <button
+                        className="product-pointer"
+                        onClick={() => {
+                          setRecommended(m.products!);
+                          setShowAll(false);
+                        }}
+                      >
+                        <SparkIcon small /> {m.products.length === 1 ? "1 product" : `${m.products.length} products`} shown on the right
+                      </button>
                     )}
                   </div>
                 </div>
@@ -313,6 +414,16 @@ export default function ChatClient({ userEmail }: { userEmail: string }) {
         )}
 
         {error && <div className="error-banner">Error: {error}</div>}
+        {checkoutDone && (
+          <div className="sent-banner">
+            <CheckIcon /> Quote sent{lastOrder ? ` — ${lastOrder.order_number} · $${lastOrder.total}` : ""}.{" "}
+            {activeId && (
+              <a href={`/quote?c=${encodeURIComponent(activeId)}`} className="sent-banner-link">
+                View quote
+              </a>
+            )}
+          </div>
+        )}
 
         <div className="composer-wrap">
           <div className="composer">
@@ -333,72 +444,217 @@ export default function ChatClient({ userEmail }: { userEmail: string }) {
         </div>
       </main>
 
-      {/* Quote / cart panel */}
-      <aside className="quote-panel">
-        <div className="quote-header">
-          <CartIcon />
-          <h2>Quote</h2>
-          {quote.length > 0 && <span className="quote-count">{quote.length}</span>}
+      {/* Product panel: full catalog by default, filtered to recommendations */}
+      <aside className="product-panel">
+        <div className="product-panel-header">
+          <SparkIcon small />
+          <h2>{hasRecommendations && !showAll ? "Recommended" : "Products"}</h2>
+          <span className="quote-count">{displayedProducts.length}</span>
         </div>
 
-        {checkoutDone && (
-          <div className="success-card">
-            <div className="success-card-title">
-              <CheckIcon /> Checked out
-            </div>
-            {lastOrder && (
-              <div className="success-card-detail">
-                Order {lastOrder.order_number} · ${lastOrder.total}
-              </div>
-            )}
-            <div className="success-card-hint">
-              This quote is locked. Start a <strong>New chat</strong> to add more products.
-            </div>
+        {hasRecommendations && (
+          <div className="panel-toggle-row">
+            <button
+              className={`panel-toggle${!showAll ? " active" : ""}`}
+              onClick={() => setShowAll(false)}
+            >
+              Recommended ({recommended.length})
+            </button>
+            <button
+              className={`panel-toggle${showAll ? " active" : ""}`}
+              onClick={() => setShowAll(true)}
+            >
+              All products ({catalog.length})
+            </button>
           </div>
         )}
 
-        <div className="quote-body">
-          {quote.length === 0 && (
+        <div className="product-panel-body">
+          {displayedProducts.length === 0 && (
             <div className="quote-empty">
-              <CartIcon size={26} />
-              Your cart is empty.
+              <SparkIcon />
+              {catalogError ? (
+                <>
+                  Couldn&apos;t load the catalog.
+                  <button className="panel-toggle" onClick={loadCatalog}>
+                    Retry
+                  </button>
+                </>
+              ) : (
+                "Loading the catalog…"
+              )}
             </div>
           )}
-          {quote.map((li) => (
-            <div key={li.line_id} className="line-item-card">
-              <div className="line-item-top">
-                <strong>{li.product_name}</strong>
-                <span>${li.unit_price * li.quantity}</span>
-              </div>
-              <div className="line-item-meta">
-                Qty {li.quantity} · ${li.unit_price} ea{li.configured ? " · configured" : ""}
-              </div>
-              {li.options && li.options.length > 0 && (
-                <div className="line-item-meta">{li.options.map((o) => o.name).join(", ")}</div>
-              )}
-              {li.attributes && Object.keys(li.attributes).length > 0 && (
-                <div className="line-item-meta">
-                  {Object.entries(li.attributes).map(([k, v]) => `${k}: ${v}`).join(", ")}
-                </div>
-              )}
-            </div>
+          {displayedProducts.map((p) => (
+            <ProductCard key={p.id} product={p} disabled={checkoutDone} onAdd={addToCart} />
           ))}
         </div>
-
-        {quote.length > 0 && (
-          <div className="quote-footer">
-            <div className="quote-total-row">
-              <span>Total</span>
-              <strong>${quoteTotal}</strong>
-            </div>
-            {activeId && !checkoutDone && (
-              <a href={`/checkout?c=${encodeURIComponent(activeId)}`} className="checkout-btn">
-                Checkout <ArrowRightIcon />
-              </a>
-            )}
-          </div>
-        )}
       </aside>
+    </div>
+  );
+}
+
+/**
+ * One product in the right panel. Click to expand, pick options/attributes/
+ * quantity, and add to the cart — the same quote the agent writes to.
+ */
+function ProductCard({
+  product,
+  disabled,
+  onAdd,
+}: {
+  product: Card;
+  disabled: boolean;
+  onAdd: (
+    productId: string,
+    quantity: number,
+    optionIds: string[],
+    attributes: Record<string, unknown>
+  ) => Promise<boolean>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [selected, setSelected] = useState<Record<string, string[]>>({}); // group -> option ids
+  const [attrs, setAttrs] = useState<Record<string, string>>({});
+  const [qty, setQty] = useState(1);
+  const [adding, setAdding] = useState(false);
+  const [added, setAdded] = useState(false);
+
+  const groups = product.option_groups ?? [];
+  const attributes = product.attributes ?? [];
+
+  // Default single-select groups to their first (included) option.
+  useEffect(() => {
+    const init: Record<string, string[]> = {};
+    for (const g of groups) {
+      if (g.min >= 1 && g.options.length > 0) init[g.group] = [g.options[0].id];
+    }
+    setSelected(init);
+    const initAttrs: Record<string, string> = {};
+    for (const a of attributes) {
+      if (a.choices.length > 0) initAttrs[a.name] = a.choices[0];
+    }
+    setAttrs(initAttrs);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [product.id]);
+
+  function toggleOption(group: OptionGroup, optionId: string) {
+    setSelected((prev) => {
+      const current = prev[group.group] ?? [];
+      const single = group.max <= 1;
+      if (single) return { ...prev, [group.group]: [optionId] };
+      if (current.includes(optionId)) {
+        const next = current.filter((id) => id !== optionId);
+        if (next.length < group.min) return prev; // keep minimum selections
+        return { ...prev, [group.group]: next };
+      }
+      if (current.length >= group.max) return prev; // at max
+      return { ...prev, [group.group]: [...current, optionId] };
+    });
+  }
+
+  const optionIds = Object.values(selected).flat();
+  const allOptions = groups.flatMap((g) => g.options);
+  const unitPrice =
+    (product.base_price ?? 0) +
+    optionIds.reduce((s, id) => s + (allOptions.find((o) => o.id === id)?.price_delta ?? 0), 0);
+
+  async function handleAdd() {
+    if (adding || disabled) return;
+    setAdding(true);
+    const ok = await onAdd(product.id, qty, optionIds, attrs);
+    setAdding(false);
+    if (ok) {
+      setAdded(true);
+      setTimeout(() => setAdded(false), 1600);
+    }
+  }
+
+  return (
+    <div className={`product-detail-card clickable${expanded ? " expanded" : ""}`}>
+      <button className="product-card-head" onClick={() => setExpanded((v) => !v)}>
+        <div className="product-detail-top">
+          <strong>{product.name}</strong>
+          {typeof product.base_price === "number" && (
+            <span className="product-detail-price">
+              {product.configurable ? "From " : ""}${product.base_price}
+            </span>
+          )}
+        </div>
+        <div className="product-card-desc">{product.description}</div>
+      </button>
+
+      {expanded && (
+        <div className="product-configurator">
+          {groups.map((g) => (
+            <div key={g.group} className="product-config-group">
+              <div className="product-config-label">
+                {g.label}
+                {g.max > 1 ? ` (up to ${g.max})` : ""}
+              </div>
+              <div className="product-config-options">
+                {g.options.map((o) => {
+                  const isSel = (selected[g.group] ?? []).includes(o.id);
+                  return (
+                    <button
+                      key={o.id}
+                      className={`option-chip selectable${isSel ? " selected" : ""}`}
+                      onClick={() => toggleOption(g, o.id)}
+                    >
+                      {o.name}
+                      {o.price_delta > 0 ? ` (+$${o.price_delta})` : ""}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+
+          {attributes.map((a) => (
+            <div key={a.name} className="product-config-group">
+              <div className="product-config-label">{a.label}</div>
+              <div className="product-config-options">
+                {a.choices.map((c) => (
+                  <button
+                    key={c}
+                    className={`option-chip selectable${attrs[a.name] === c ? " selected" : ""}`}
+                    onClick={() => setAttrs((prev) => ({ ...prev, [a.name]: c }))}
+                  >
+                    {c}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+
+          <div className="product-add-row">
+            <div className="qty-stepper">
+              <button onClick={() => setQty((q) => Math.max(1, q - 1))} aria-label="Decrease quantity">
+                −
+              </button>
+              <span>{qty}</span>
+              <button onClick={() => setQty((q) => Math.min(99, q + 1))} aria-label="Increase quantity">
+                +
+              </button>
+            </div>
+            <button
+              className={`add-to-cart-btn${added ? " added" : ""}`}
+              onClick={handleAdd}
+              disabled={adding || disabled}
+              title={disabled ? "Quote is locked — start a new chat" : "Add to cart"}
+            >
+              {added ? (
+                <>
+                  <CheckIcon /> Added
+                </>
+              ) : adding ? (
+                "Adding…"
+              ) : (
+                `Add to cart · $${unitPrice * qty}`
+              )}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -438,13 +694,6 @@ function CheckIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
       <path d="M20 6 9 17l-5-5" />
-    </svg>
-  );
-}
-function ArrowRightIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M5 12h14M13 5l7 7-7 7" />
     </svg>
   );
 }

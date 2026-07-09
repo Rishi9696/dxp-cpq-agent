@@ -56,7 +56,7 @@ export type Quote = {
 
 export async function createConversation(
   userId: string,
-  sessionId: string,
+  sessionId: string | null,
   title: string
 ): Promise<Conversation> {
   const { data, error } = await supabase()
@@ -90,6 +90,12 @@ export async function listConversations(userId: string): Promise<Conversation[]>
     .limit(50);
   if (error) throw new Error(`listConversations: ${error.message}`);
   return (data as Conversation[]) ?? [];
+}
+
+/** Attach an agent session to a conversation created without one (e.g. from a UI cart add). */
+export async function updateConversationSession(id: string, sessionId: string): Promise<void> {
+  const { error } = await supabase().from("conversations").update({ session_id: sessionId }).eq("id", id);
+  if (error) throw new Error(`updateConversationSession: ${error.message}`);
 }
 
 export async function touchConversation(id: string): Promise<void> {

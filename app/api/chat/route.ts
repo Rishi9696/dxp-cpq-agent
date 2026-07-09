@@ -5,6 +5,7 @@ import {
   getQuote,
   saveMessage,
   touchConversation,
+  updateConversationSession,
   updateConversationTitle,
 } from "@/lib/supabase";
 import { requireSessionUser } from "@/lib/supabase/server";
@@ -57,8 +58,12 @@ export async function POST(req: Request) {
     isNew = true;
   }
   const conv = conversation;
-  const sessionId = conv.session_id;
-  if (!sessionId) return Response.json({ error: "conversation has no session" }, { status: 500 });
+  // Conversations started from a UI cart add have no agent session yet — create one now.
+  let sessionId = conv.session_id;
+  if (!sessionId) {
+    sessionId = await createSession();
+    await updateConversationSession(conv.id, sessionId);
+  }
 
   // Stream the turn as Server-Sent Events.
   const encoder = new TextEncoder();

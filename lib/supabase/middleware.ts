@@ -10,6 +10,15 @@ function isPublicPath(pathname: string): boolean {
   return false;
 }
 
+// Paths a logged-in-but-not-yet-MFA-verified (AAL1) user may reach.
+function isMfaPath(pathname: string): boolean {
+  return (
+    pathname === "/mfa" ||
+    pathname.startsWith("/api/auth/mfa") ||
+    pathname === "/api/auth/logout"
+  );
+}
+
 /**
  * Refreshes the Supabase session cookie on every request and gates every
  * non-public route behind login. Runs before any page/API route, so
@@ -44,17 +53,50 @@ export async function updateSession(request: NextRequest): Promise<NextResponse>
   const { data } = await supabase.auth.getUser();
   const { pathname } = request.nextUrl;
 
+  // getUser() may have rotated the refresh token — any redirect we return must
+  // carry the refreshed cookies or the session gets silently invalidated.
+  const redirectWithCookies = (url: URL) => {
+    const redirect = NextResponse.redirect(url);
+    response.cookies.getAll().forEach((c) => redirect.cookies.set(c));
+    return redirect;
+  };
+
   if (!data.user && !isPublicPath(pathname)) {
     if (pathname.startsWith("/api/")) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
     const loginUrl = new URL("/login", request.url);
     loginUrl.searchParams.set("next", pathname);
-    return NextResponse.redirect(loginUrl);
+    return redirectWithCookies(loginUrl);
   }
 
   if (data.user && pathname === "/login") {
-    return NextResponse.redirect(new URL("/", request.url));
+    return redirectWithCookies(new URL("/", request.url));
+  }
+
+  // Enforce MFA (TOTP / Google Authenticator): every logged-in user must have a
+  // verified factor AND an AAL2 session before touching anything but /mfa.
+  if (data.user && !isPublicPath(pathname) && !isMfaPath(pathname)) {
+    const hasVerifiedFactor = (data.user.factors ?? []).some((f) => f.status === "verified");
+    const { data: aal } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+    const needsMfa = !hasVerifiedFactor || aal?.currentLevel !== "aal2";
+    if (needsMfa) {
+      if (pathname.startsWith("/api/")) {
+        return NextResponse.json({ error: "MFA required" }, { status: 401 });
+      }
+      const mfaUrl = new URL("/mfa", request.url);
+      mfaUrl.searchParams.set("next", pathname);
+      return redirectWithCookies(mfaUrl);
+    }
+  }
+
+  // Fully authenticated users don't need the /mfa page.
+  if (data.user && pathname === "/mfa") {
+    const { data: aal } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+    const hasVerifiedFactor = (data.user.factors ?? []).some((f) => f.status === "verified");
+    if (hasVerifiedFactor && aal?.currentLevel === "aal2") {
+      return redirectWithCookies(new URL("/", request.url));
+    }
   }
 
   return response;

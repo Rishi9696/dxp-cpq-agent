@@ -1,15 +1,16 @@
 -- Run this in the Supabase SQL editor (Dashboard -> SQL Editor -> New query).
--- Simulated CPQ backend: conversations + messages (memory) and quotes + line items.
+-- Simulated CPQ backend: conversations + messages (memory), quotes (cart), orders.
+-- This matches lib/supabase.ts exactly.
 
 create table if not exists conversations (
   id          uuid primary key default gen_random_uuid(),
-  client_id   text not null,                 -- browser-local id (no auth in this POC)
-  session_id  text,                          -- Anthropic Managed Agents session id
+  user_id     text not null,                  -- Supabase Auth user id
+  session_id  text,                           -- Anthropic Managed Agents session id (null until first chat turn)
   title       text not null default 'New chat',
   created_at  timestamptz not null default now(),
   updated_at  timestamptz not null default now()
 );
-create index if not exists idx_conversations_client on conversations (client_id, updated_at desc);
+create index if not exists idx_conversations_user on conversations (user_id, updated_at desc);
 
 create table if not exists messages (
   id              bigserial primary key,
@@ -21,40 +22,31 @@ create table if not exists messages (
 );
 create index if not exists idx_messages_conversation on messages (conversation_id, created_at);
 
+-- One quote (cart) per conversation. All line items live in the `items` JSONB
+-- array: [{line_id, product_id, product_name, quantity, unit_price, configured,
+-- options, attributes}]. `checkout_done` locks the quote after finalization.
 create table if not exists quotes (
   id              uuid primary key default gen_random_uuid(),
   conversation_id uuid not null unique references conversations(id) on delete cascade,
+  items           jsonb not null default '[]'::jsonb,
+  checkout_done   boolean not null default false,
   created_at      timestamptz not null default now()
 );
 
-create table if not exists quote_line_items (
-  id           bigserial primary key,
-  quote_id     uuid not null references quotes(id) on delete cascade,
-  product_id   text not null,
-  product_name text not null,
-  quantity     int not null default 1,
-  unit_price   numeric not null default 0,
-  configured   boolean not null default false,
-  options      jsonb not null default '[]'::jsonb,      -- [{id,name,price_delta}]
-  attributes   jsonb not null default '{}'::jsonb,      -- {name: value}
-  created_at   timestamptz not null default now()
-);
-create index if not exists idx_qli_quote on quote_line_items (quote_id, created_at);
-
--- One row per completed checkout. The full product list is snapshotted into
+-- One row per finalized quote. The full product list is snapshotted into
 -- the `items` JSONB column, so an order is self-contained even if the quote
 -- later changes.
 create table if not exists orders (
   id              uuid primary key default gen_random_uuid(),
   order_number    text not null,
   conversation_id uuid references conversations(id) on delete set null,
-  client_id       text,
-  items           jsonb not null default '[]'::jsonb,   -- [{product_name, quantity, unit_price, options, attributes}]
+  user_id         text,
+  items           jsonb not null default '[]'::jsonb,
   total           numeric not null default 0,
   status          text not null default 'paid',
   created_at      timestamptz not null default now()
 );
-create index if not exists idx_orders_client on orders (client_id, created_at desc);
+create index if not exists idx_orders_user on orders (user_id, created_at desc);
 
 -- Access is server-side only via the service_role key, so RLS is left disabled
 -- for this POC. Do NOT expose the service_role key to the browser.

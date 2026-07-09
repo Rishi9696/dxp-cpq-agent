@@ -24,6 +24,12 @@ function LoginForm() {
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error ?? "Login failed");
       const next = searchParams.get("next") || "/";
+      // MFA is required — set up or verify the authenticator before continuing.
+      if (data.mfa) {
+        router.push(`/mfa?next=${encodeURIComponent(next)}`);
+        router.refresh();
+        return;
+      }
       router.push(next);
       router.refresh();
     } catch (e) {

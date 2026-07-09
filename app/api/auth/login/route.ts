@@ -44,5 +44,10 @@ export async function POST(req: Request) {
   if (error) {
     return Response.json({ error: "Invalid username or password." }, { status: 401 });
   }
-  return Response.json({ ok: true });
+
+  // MFA is enforced: report whether the user must enroll (first login) or
+  // verify a TOTP code (returning user) so the client can route to /mfa.
+  const { data: factors } = await supabase.auth.mfa.listFactors();
+  const hasVerifiedFactor = (factors?.totp ?? []).some((f) => f.status === "verified");
+  return Response.json({ ok: true, mfa: hasVerifiedFactor ? "verify" : "enroll" });
 }

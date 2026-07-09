@@ -1,7 +1,13 @@
-import { randomUUID } from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
-import { PRODUCTS, searchProducts, getConfiguration, buildLineItem } from "./catalog";
-import { getQuote, saveQuoteItems, type QuoteItem } from "./supabase";
+import {
+  PRODUCTS,
+  searchProducts,
+  getConfiguration,
+  type OptionGroup,
+  type CatalogAttribute,
+} from "./catalog";
+import { getQuote, type QuoteItem } from "./supabase";
+import { addToQuote, removeFromQuote } from "./quote";
 
 // Anthropic Managed Agents. The Agent (model, system prompt, custom tools) and
 // the Environment are created once by scripts/setup-agent.mjs. Here we create/
@@ -9,8 +15,29 @@ import { getQuote, saveQuoteItems, type QuoteItem } from "./supabase";
 // configure_product, add_to_quote, remove_from_quote), and read the final message.
 const client = new Anthropic();
 
-export type Card = { id: string; name: string; description: string };
+export type Card = {
+  id: string;
+  name: string;
+  description: string;
+  base_price: number;
+  configurable: boolean;
+  option_groups?: OptionGroup[];
+  attributes?: CatalogAttribute[];
+};
 export type TurnResult = { reply: string; products: Card[] };
+
+/** Products the agent's reply mentioned by name — with full pricing + config info for the UI. */
+function matchProducts(replyLower: string): Card[] {
+  return PRODUCTS.filter((p) => replyLower.includes(p.name.toLowerCase())).map((p) => ({
+    id: p.id,
+    name: p.name,
+    description: p.description,
+    base_price: p.base_price,
+    configurable: p.configurable,
+    option_groups: p.option_groups,
+    attributes: p.attributes,
+  }));
+}
 
 function requireIds() {
   const agentId = process.env.DXP_AGENT_ID;
@@ -34,9 +61,8 @@ export async function createSession(): Promise<string> {
   return session.id;
 }
 
-const optSig = (ids: string[]) => ids.slice().sort().join(",");
-
 // Execute a custom tool call client-side. All quote items live in quotes.items.
+// Cart mutations go through lib/quote.ts — the same code path the UI uses.
 async function runTool(
   name: string,
   input: Record<string, unknown>,
@@ -50,12 +76,6 @@ async function runTool(
   }
 
   if (name === "add_to_quote") {
-    const quote = await getQuote(conversationId);
-    if (quote.checkout_done) {
-      return JSON.stringify({
-        error: "This quote is already checked out and locked. Tell the user to start a New chat to build a new quote.",
-      });
-    }
     const productId = String(input.product_id ?? "");
     const quantity = Math.max(1, Number(input.quantity ?? 1) || 1);
     const optionIds = Array.isArray(input.selected_option_ids)
@@ -65,48 +85,17 @@ async function runTool(
       input.attributes && typeof input.attributes === "object"
         ? (input.attributes as Record<string, unknown>)
         : {};
-    const li = buildLineItem(productId, optionIds);
-    if (!li) return JSON.stringify({ error: `Unknown product_id: ${productId}` });
-
-    // Merge identical lines (same product + options + attributes) into quantity.
-    const items = quote.items;
-    const match = items.find(
-      (it) =>
-        it.product_id === productId &&
-        optSig(it.options.map((o) => o.id)) === optSig(optionIds) &&
-        JSON.stringify(it.attributes) === JSON.stringify(attributes)
-    );
-    if (match) match.quantity += quantity;
-    else
-      items.push({
-        line_id: randomUUID().slice(0, 8),
-        product_id: productId,
-        product_name: li.name,
-        quantity,
-        unit_price: li.unit_price,
-        configured: li.configured,
-        options: li.options,
-        attributes,
-      });
-    await saveQuoteItems(conversationId, items);
-    return JSON.stringify({ added: li.name, quote: items });
+    const result = await addToQuote(conversationId, productId, quantity, optionIds, attributes);
+    if (!result.ok) return JSON.stringify({ error: result.error });
+    return JSON.stringify({ added: result.added, quote: result.items });
   }
 
   if (name === "remove_from_quote") {
-    const quote = await getQuote(conversationId);
-    if (quote.checkout_done) {
-      return JSON.stringify({
-        error: "This quote is already checked out and locked. Tell the user to start a New chat.",
-      });
-    }
     const lineId = input.line_id != null ? String(input.line_id) : undefined;
     const productId = input.product_id ? String(input.product_id) : undefined;
-    const before = quote.items.length;
-    const items = quote.items.filter((it) =>
-      lineId ? it.line_id !== lineId : productId ? it.product_id !== productId : true
-    );
-    await saveQuoteItems(conversationId, items);
-    return JSON.stringify({ removed_count: before - items.length, quote: items });
+    const result = await removeFromQuote(conversationId, { lineId, productId });
+    if (!result.ok) return JSON.stringify({ error: result.error });
+    return JSON.stringify({ removed_count: result.removed_count, quote: result.items });
   }
 
   return JSON.stringify({ error: `Unknown tool: ${name}` });
@@ -160,10 +149,14 @@ export async function runAgentTurn(
     } else if (event.type === "agent.custom_tool_use") {
       reply = "";
       if (++toolUses > 12) break;
+      // Always answer the tool call — an unanswered one leaves the session
+      // stuck in requires_action and hangs the next turn.
       const result = await runTool(
         event.name,
         (event.input as Record<string, unknown>) ?? {},
         conversationId
+      ).catch((e: unknown) =>
+        JSON.stringify({ error: e instanceof Error ? e.message : "Tool execution failed" })
       );
       await client.beta.sessions.events.send(sessionId, {
         events: [
@@ -181,9 +174,7 @@ export async function runAgentTurn(
   }
 
   const replyLower = reply.toLowerCase();
-  const products: Card[] = PRODUCTS.filter((p) => replyLower.includes(p.name.toLowerCase())).map(
-    (p) => ({ id: p.id, name: p.name, description: p.description })
-  );
+  const products: Card[] = matchProducts(replyLower);
   return { reply: reply.trim(), products };
 }
 
@@ -255,10 +246,14 @@ export async function runAgentTurnStreaming(
       onEvent({ type: "reset" });
       onEvent({ type: "status", text: TOOL_STATUS[event.name] ?? "Working…" });
       if (++toolUses > 12) break;
+      // Always answer the tool call — an unanswered one leaves the session
+      // stuck in requires_action and hangs the next turn.
       const result = await runTool(
         event.name,
         (event.input as Record<string, unknown>) ?? {},
         conversationId
+      ).catch((e: unknown) =>
+        JSON.stringify({ error: e instanceof Error ? e.message : "Tool execution failed" })
       );
       await client.beta.sessions.events.send(sessionId, {
         events: [
@@ -276,9 +271,7 @@ export async function runAgentTurnStreaming(
   }
 
   const replyLower = reply.toLowerCase();
-  const products: Card[] = PRODUCTS.filter((p) => replyLower.includes(p.name.toLowerCase())).map(
-    (p) => ({ id: p.id, name: p.name, description: p.description })
-  );
+  const products: Card[] = matchProducts(replyLower);
   return { reply: reply.trim(), products };
 }
 
