@@ -55,8 +55,8 @@ export async function POST(req: Request) {
     if (!result.ok) return Response.json({ error: result.error }, { status: 409 });
     return Response.json({ conversationId, items: result.items, added: result.added });
   } catch (e) {
-    const m = e instanceof Error ? e.message : "Unknown error";
-    return Response.json({ error: m }, { status: 500 });
+    console.error("Add to quote failed:", e);
+    return Response.json({ error: "Failed to add item to cart." }, { status: 500 });
   }
 }
 
@@ -80,8 +80,8 @@ export async function PATCH(req: Request) {
     if (!result.ok) return Response.json({ error: result.error }, { status: 409 });
     return Response.json({ items: result.items });
   } catch (e) {
-    const m = e instanceof Error ? e.message : "Unknown error";
-    return Response.json({ error: m }, { status: 500 });
+    console.error("Update quantity failed:", e);
+    return Response.json({ error: "Failed to update quantity." }, { status: 500 });
   }
 }
 
@@ -104,7 +104,7 @@ export async function DELETE(req: Request) {
     if (!result.ok) return Response.json({ error: result.error }, { status: 409 });
     return Response.json({ items: result.items });
   } catch (e) {
-    const m = e instanceof Error ? e.message : "Unknown error";
-    return Response.json({ error: m }, { status: 500 });
+    console.error("Remove from quote failed:", e);
+    return Response.json({ error: "Failed to remove item." }, { status: 500 });
   }
 }

@@ -1,5 +1,6 @@
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -11,6 +12,15 @@ export async function POST(req: Request) {
   const anonKey = process.env.SUPABASE_ANON_KEY;
   if (!url || !anonKey) {
     return Response.json({ error: "SUPABASE_URL / SUPABASE_ANON_KEY are not set." }, { status: 500 });
+  }
+
+  // Blunt brute-forcing: 8 attempts per IP per 5 minutes.
+  const rl = checkRateLimit(`login:${getClientIp(req)}`, 8, 5 * 60_000);
+  if (!rl.ok) {
+    return Response.json(
+      { error: "Too many login attempts. Try again in a few minutes." },
+      { status: 429, headers: { "retry-after": String(rl.retryAfterSeconds) } }
+    );
   }
 
   let email: string;

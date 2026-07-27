@@ -9,6 +9,7 @@ import {
   updateConversationTitle,
 } from "@/lib/supabase";
 import { requireSessionUser } from "@/lib/supabase/server";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 // Managed Agents flow can take a while (session provisioning + agent loop).
 export const runtime = "nodejs";
@@ -33,6 +34,16 @@ export async function POST(req: Request) {
 
   const user = await requireSessionUser().catch(() => null);
   if (!user) return Response.json({ error: "Not authenticated" }, { status: 401 });
+
+  // Each turn can trigger multiple Anthropic API calls (up to 12 tool uses) —
+  // cap per-user throughput so one account can't run up API costs or starve others.
+  const rl = checkRateLimit(`chat:${user.id}`, 20, 5 * 60_000);
+  if (!rl.ok) {
+    return Response.json(
+      { error: "You're sending messages too quickly. Please slow down." },
+      { status: 429, headers: { "retry-after": String(rl.retryAfterSeconds) } }
+    );
+  }
 
   let message: string;
   let conversationId: string | undefined;
@@ -103,8 +114,8 @@ export async function POST(req: Request) {
           title,
         });
       } catch (e) {
-        const m = e instanceof Error ? e.message : "Unknown error";
-        send({ type: "error", error: `Agent failed: ${m}` });
+        console.error("Agent turn failed:", e);
+        send({ type: "error", error: "Something went wrong while processing your message. Please try again." });
       } finally {
         controller.close();
       }

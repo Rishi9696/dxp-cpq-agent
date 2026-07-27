@@ -52,7 +52,7 @@ export async function POST(req: Request) {
       created_at: order.created_at,
     });
   } catch (e) {
-    const m = e instanceof Error ? e.message : "Unknown error";
-    return Response.json({ error: `Checkout failed: ${m}` }, { status: 500 });
+    console.error("Checkout failed:", e);
+    return Response.json({ error: "Checkout failed. Please try again." }, { status: 500 });
   }
 }

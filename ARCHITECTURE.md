@@ -101,6 +101,7 @@ dxp-cpq-agent/
 │   ├── catalog.ts                # Product catalog + search/config
 │   ├── quote.ts                  # Cart mutation core
 │   ├── quote.test.ts             # Unit tests for quote.ts (vitest)
+│   ├── rate-limit.ts             # In-memory fixed-window rate limiter
 │   ├── supabase.ts               # Service-role client + all DB functions
 │   └── supabase/
 │       ├── server.ts             # SSR client + auth helpers
@@ -301,7 +302,10 @@ Both agent tools and UI cart operations funnel through `lib/quote.ts` (`addToQuo
   - Authenticated but not AAL2 → redirect to `/mfa`.
   - **Fails closed** (500) if Supabase env vars missing; re-attaches rotated refresh-token cookies onto redirects.
 - Helpers in `lib/supabase/server.ts`: `createSupabaseServerClient`, `getSessionUser`, `requireSessionUser` (throws `AuthRequiredError`).
-- No RLS (intentional — service-role only), no rate limiting, no error monitoring.
+- **Rate limiting** (`lib/rate-limit.ts`, in-memory fixed window): 8 login attempts / 5min per IP, 20 chat turns / 5min per user. Not shared across serverless instances — adequate for a pilot, swap for Upstash Redis/Vercel KV before scaling.
+- **Security headers** (`next.config.mjs`): CSP, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy`, HSTS.
+- **Error responses**: 500s log the real error server-side and return a generic message to the client; 400s stay specific (safe — they describe the caller's own input).
+- No RLS (intentional — service-role only), no error monitoring (e.g. Sentry).
 
 ### Environment variables
 
@@ -353,13 +357,19 @@ Both agent tools and UI cart operations funnel through `lib/quote.ts` (`addToQuo
 4. ~~Tool param mismatch~~ — `scripts/setup-agent.mjs`'s tool schema and system prompt now use `line_id` (string), matching what `lib/agent.ts` actually injects and reads. **Note:** if you've already run `npm run setup` against the old schema, re-run it so the live agent definition picks up the corrected tool.
 6. ~~Legacy `/checkout` + `/payment` flow~~ — removed; `/api/checkout` remains, called directly by `/cart`'s "Finalize" button.
 7. ~~No tests~~ — `lib/quote.ts` (the shared cart-mutation core used by both the agent and the UI) now has unit tests under `lib/quote.test.ts`, run via `npm test` and in CI (`.github/workflows/ci.yml`), which also type-checks and builds on every push/PR.
+8. ~~No rate limiting~~ — `lib/rate-limit.ts` adds a fixed-window limiter applied to `/api/auth/login` (8/5min per IP) and `/api/chat` (20/5min per user). It's in-memory (per warm instance, not shared across serverless regions) — fine for a pilot, but should move to Upstash Redis/Vercel KV before real production traffic.
+9. ~~Error messages leaked internals~~ — 500-level catches in `/api/chat`, `/api/checkout`, `/api/quote`, `/api/conversations/[id]` now log the real error server-side (`console.error`) and return a generic client-facing message. 400-level validation errors are still specific (they're safe — they describe the caller's own bad input).
+10. ~~No security headers~~ — `next.config.mjs` now sets CSP, `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, and HSTS. **Verify after deploying** — the CSP is conservative (`script-src 'self'`, `style-src 'self' 'unsafe-inline'`) and hasn't been tested against a real build in this environment; check the browser console for violations and loosen `style-src`/`connect-src` if something breaks.
+11. ~~Unbounded quote quantity~~ — `lib/quote.ts` now caps line quantities at 99 (`MAX_QUANTITY`).
 
 **Still open:**
 
 - **Heuristic product cards** — `matchProducts` substring-matches reply text against catalog names; can miss or mis-attribute products. Would need the agent to return structured product references instead.
-- **No monitoring or rate limiting.**
+- **Agent environment has unrestricted networking** — `scripts/setup-agent.mjs` creates the Managed Agent environment with `networking: { type: "unrestricted" }`, more than the app's four fixed tools actually need. Left unchanged here (didn't want to guess at the Managed Agents API's exact enum values without being able to verify against a live environment) — worth checking the Managed Agents API docs for a restricted-networking option.
+- **No monitoring/error tracking** (e.g. Sentry).
 - **No RLS** — intentional; all access is server-side via the service-role key with ownership enforced in code.
 - **No e2e/integration tests** — only `lib/quote.ts`'s pure mutation logic is unit-tested; API routes, auth flow, and the agent loop are untested.
+- **No `npm audit` run yet** — CI now runs `npm audit --audit-level=high` on every push/PR, but hasn't executed against this dependency tree yet (no registry access in the environment these changes were made in). First CI run will surface anything outstanding.
 
 ---
 
@@ -370,6 +380,7 @@ Both agent tools and UI cart operations funnel through `lib/quote.ts` (`addToQuo
 | `lib/agent.ts` | Agent loop, tool execution, streaming |
 | `lib/quote.ts` | Shared cart mutation core |
 | `lib/quote.test.ts` | Unit tests for `lib/quote.ts` |
+| `lib/rate-limit.ts` | In-memory fixed-window rate limiter |
 | `lib/supabase.ts` | All DB access (13 functions) |
 | `lib/supabase/middleware.ts` | Auth/MFA gate |
 | `scripts/setup-agent.mjs` | Agent definition, system prompt, tool schemas |

@@ -23,6 +23,10 @@ export type QuoteOpResult =
 const LOCKED_MSG =
   "This quote is already checked out and locked. Start a new chat to build a new quote.";
 
+// Sanity cap — prevents accidental/malicious absurd quantities (e.g. client
+// sending Number.MAX_SAFE_INTEGER) from producing nonsensical totals.
+const MAX_QUANTITY = 99;
+
 /** Add a product (with options/attributes/quantity), merging identical lines. */
 export async function addToQuote(
   conversationId: string,
@@ -34,7 +38,7 @@ export async function addToQuote(
   const quote = await getQuote(conversationId);
   if (quote.checkout_done) return { ok: false, error: LOCKED_MSG };
 
-  const qty = Math.max(1, Number(quantity) || 1);
+  const qty = Math.min(MAX_QUANTITY, Math.max(1, Number(quantity) || 1));
   const li = buildLineItem(productId, optionIds);
   if (!li) return { ok: false, error: `Unknown product_id: ${productId}` };
 
@@ -45,7 +49,7 @@ export async function addToQuote(
       optSig(it.options.map((o) => o.id)) === optSig(optionIds) &&
       attrSig(it.attributes) === attrSig(attributes)
   );
-  if (match) match.quantity += qty;
+  if (match) match.quantity = Math.min(MAX_QUANTITY, match.quantity + qty);
   else
     items.push({
       line_id: randomUUID().slice(0, 8),
@@ -84,7 +88,7 @@ export async function setLineQuantity(
 ): Promise<QuoteOpResult> {
   const quote = await getQuote(conversationId);
   if (quote.checkout_done) return { ok: false, error: LOCKED_MSG };
-  const qty = Math.max(0, Math.floor(Number(quantity) || 0));
+  const qty = Math.min(MAX_QUANTITY, Math.max(0, Math.floor(Number(quantity) || 0)));
   let items = quote.items;
   const line = items.find((it) => it.line_id === lineId);
   if (!line) return { ok: false, error: `Unknown line_id: ${lineId}` };

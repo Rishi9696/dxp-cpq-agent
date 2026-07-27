@@ -25,7 +25,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
       order,
     });
   } catch (e) {
-    const m = e instanceof Error ? e.message : "Unknown error";
-    return Response.json({ error: m }, { status: 500 });
+    console.error("Failed to load conversation:", e);
+    return Response.json({ error: "Failed to load conversation." }, { status: 500 });
   }
 }
