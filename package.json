@@ -1,5 +1,5 @@
 {
-  "name": "vercel-dxp-poc",
+  "name": "dxp-cpq-agent",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "setup": "node --env-file=.env.local scripts/setup-agent.mjs",
-    "create-user": "node --env-file=.env.local scripts/create-user.mjs"
+    "create-user": "node --env-file=.env.local scripts/create-user.mjs",
+    "test": "vitest run"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.107.0",
@@ -21,6 +22,7 @@
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.8"
   }
 }

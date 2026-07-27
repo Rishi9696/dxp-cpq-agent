@@ -15,7 +15,7 @@ Tools:
 - search_products(query): find catalog products. Each result has an "is_configurable" flag.
 - configure_product(product_id): get the option groups and attributes for a configurable product.
 - add_to_quote(product_id, quantity?, selected_option_ids?, attributes?): add a line item to the quote.
-- remove_from_quote(line_item_id?, product_id?): remove a line item. Prefer line_item_id (shown in the current quote context as [line_item_id N]); fall back to product_id.
+- remove_from_quote(line_id?, product_id?): remove a line item. Prefer line_id (shown in the current quote context as [line_id xxxxxxxx]); fall back to product_id.
 
 Intent detection:
 - EXECUTION intent (add/remove/build the quote): "add", "include", "put on the quote", "remove", "delete", "take off", "I need", concrete requests. Default to execution when the requirement is concrete.
@@ -23,7 +23,7 @@ Intent detection:
 
 Rules for execution intent (do NOT ask for confirmation when intent is clear):
 - Adding: if is_configurable is true, call configure_product, choose sensible selections from the user's request (e.g. "32GB RAM" -> the matching option id), then call add_to_quote with selected_option_ids and any attributes. If is_configurable is false, call add_to_quote directly.
-- Removing: use the line_item_id from the current quote context; if the user names a product, match it to that line and remove_from_quote.
+- Removing: use the line_id from the current quote context; if the user names a product, match it to that line and remove_from_quote.
 - After acting, briefly tell the user what changed and the running quote.
 
 For discovery intent: name the relevant products so they appear as cards; do not change the quote.
@@ -84,11 +84,11 @@ const TOOLS = [
     type: "custom",
     name: "remove_from_quote",
     description:
-      "Remove a line item from the quote. Prefer line_item_id (from the current quote context [line_item_id N]); otherwise pass product_id to remove matching items.",
+      "Remove a line item from the quote. Prefer line_id (from the current quote context [line_id xxxxxxxx]); otherwise pass product_id to remove matching items.",
     input_schema: {
       type: "object",
       properties: {
-        line_item_id: { type: "integer", description: "The line_item_id shown in the quote context" },
+        line_id: { type: "string", description: "The line_id shown in the quote context" },
         product_id: { type: "string", description: "Fallback: remove items with this product_id" },
       },
     },
@@ -102,7 +102,7 @@ async function main() {
     console.log("Reusing environment:", environmentId);
   } else {
     const environment = await client.beta.environments.create({
-      name: `dxp-poc-env-${Math.floor(Number(process.env.STAMP) || 3)}`,
+      name: `dxp-cpq-agent-env-${Math.floor(Number(process.env.STAMP) || 3)}`,
       config: { type: "cloud", networking: { type: "unrestricted" } },
     });
     environmentId = environment.id;
